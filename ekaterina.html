@@ -192,6 +192,36 @@
       font-weight: 500;
     }
 
+    /* Индикатор автосохранения / синхронизации */
+    .sync-status-badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 20px;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      transition: all 0.25s ease;
+      background: rgba(31, 111, 235, 0.12);
+      color: #58a6ff;
+      border: 1px solid rgba(31, 111, 235, 0.3);
+    }
+    .sync-status-badge.saving {
+      background: rgba(240, 136, 62, 0.15);
+      color: #f0883e;
+      border-color: rgba(240, 136, 62, 0.4);
+    }
+    .sync-status-badge.synced {
+      background: rgba(46, 160, 67, 0.15);
+      color: #3fb950;
+      border-color: rgba(46, 160, 67, 0.4);
+    }
+    .sync-status-badge.error {
+      background: rgba(248, 81, 73, 0.15);
+      color: #f85149;
+      border-color: rgba(248, 81, 73, 0.4);
+    }
+
     /* Прогресс тренировки */
     .progress-section {
       padding: 0 18px 10px;
@@ -757,13 +787,18 @@
     </div>
   </header>
 
-  <!-- Инфо-панель: Прошлая и Сегодняшняя даты -->
+  <!-- Инфо-панель: Прошлая и Сегодняшняя даты + статус автосохранения -->
   <div class="info-bar">
-    <div class="date-badge prev-date-badge" id="prev-date-badge" title="Дата прошлой тренировки">
-      <span class="badge-lbl">Было:</span> <span id="prev-date-val">...</span>
+    <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+      <div class="date-badge prev-date-badge" id="prev-date-badge" title="Дата прошлой тренировки">
+        <span class="badge-lbl">Было:</span> <span id="prev-date-val">...</span>
+      </div>
+      <div class="date-badge today-date-badge" id="today-date-badge" title="Дата сегодняшней тренировки">
+        <span class="badge-lbl">Сегодня:</span> <span id="today-date-val">...</span>
+      </div>
     </div>
-    <div class="date-badge today-date-badge" id="today-date-badge" title="Дата сегодняшней тренировки">
-      <span class="badge-lbl">Сегодня:</span> <span id="today-date-val">...</span>
+    <div class="sync-status-badge synced" id="sync-status-badge" title="Статус синхронизации с Google Таблицей">
+      <span id="sync-icon">☁️</span> <span id="sync-text">Синхронизировано</span>
     </div>
   </div>
 
@@ -1224,6 +1259,51 @@
       if (navigator.vibrate) navigator.vibrate([150, 100, 150, 100, 300]);
     }
 
+    // Состояние сессии и синхронизация
+    let activeSyncRequests = 0;
+
+    function updateSyncStatus(status) {
+      const badge = document.getElementById('sync-status-badge');
+      const icon = document.getElementById('sync-icon');
+      const text = document.getElementById('sync-text');
+      if (!badge || !icon || !text) return;
+
+      badge.className = 'sync-status-badge ' + status;
+      if (status === 'saving') {
+        icon.textContent = '🔄';
+        text.textContent = 'Сохранение...';
+      } else if (status === 'synced') {
+        icon.textContent = '☁️';
+        text.textContent = 'Сохранено';
+      } else if (status === 'error') {
+        icon.textContent = '⚠️';
+        text.textContent = 'Оффлайн';
+      }
+    }
+
+    function getStorageKey(blockNum) {
+      const targetDate = workoutData?.targetDate || new Date().toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
+      return `gym_state_b${blockNum}_${targetDate}`;
+    }
+
+    function saveLocalSessionState() {
+      try {
+        const key = getStorageKey(currentBlock);
+        localStorage.setItem(key, JSON.stringify(userSetsState));
+      } catch (e) {}
+    }
+
+    function restoreLocalSessionState() {
+      try {
+        const key = getStorageKey(currentBlock);
+        const data = localStorage.getItem(key);
+        if (data) {
+          const parsed = JSON.parse(data);
+          userSetsState = Object.assign({}, userSetsState, parsed);
+        }
+      } catch (e) {}
+    }
+
     // Инициализация
     window.addEventListener('DOMContentLoaded', () => {
       document.getElementById('api-url-input').value = scriptApiUrl;
@@ -1242,6 +1322,7 @@
     // Переключение блока
     function switchBlock(blockNum) {
       if (currentBlock === blockNum) return;
+      saveLocalSessionState();
       currentBlock = blockNum;
 
       document.getElementById('tab-block-1').classList.toggle('active', blockNum === 1);
@@ -1268,7 +1349,28 @@
           if (json.success && json.data) {
             workoutData = json.data;
             updateDateLabels(workoutData.prevDate, workoutData.targetDate);
+
+            // Восстанавливаем выполненные подходы:
+            // 1. Из ответа Google Apps Script (если в таблице уже зафиксированы данные)
+            userSetsState = {};
+            if (workoutData.exercises) {
+              workoutData.exercises.forEach((ex, exIdx) => {
+                ex.sets.forEach((set, sIdx) => {
+                  if (set.done) {
+                    userSetsState[`ex_${exIdx}_set_${sIdx}`] = {
+                      completed: true,
+                      val: set.target || set.prev
+                    };
+                  }
+                });
+              });
+            }
+
+            // 2. Накладываем сохраненные в localStorage браузера (мгновенная надежность)
+            restoreLocalSessionState();
+
             renderExercises(workoutData.exercises);
+            updateSyncStatus('synced');
             return;
           }
         } catch (err) {
@@ -1293,7 +1395,9 @@
       };
 
       updateDateLabels(prevDate, targetDate);
+      restoreLocalSessionState();
       renderExercises(workoutData.exercises);
+      updateSyncStatus('synced');
     }
 
     // Отрисовка упражнений в виде аккордеонов (изначально свернуты)
@@ -1317,7 +1421,10 @@
         let setsRowsHtml = '';
         ex.sets.forEach((set, sIdx) => {
           const setKey = `ex_${exIdx}_set_${sIdx}`;
-          const currentVal = userSetsState[setKey]?.val || set.target || set.prev;
+          if (userSetsState[setKey] === undefined && set.done) {
+            userSetsState[setKey] = { completed: true, val: set.target || set.prev };
+          }
+          const currentVal = userSetsState[setKey]?.val !== undefined ? userSetsState[setKey].val : (set.target || set.prev);
           const isDone = !!userSetsState[setKey]?.completed;
 
           setsRowsHtml += `
@@ -1327,7 +1434,7 @@
               <div class="set-input-box">
                 <input type="text" class="set-input" id="input-${setKey}" 
                        value="${currentVal}" 
-                       oninput="onSetInputChange('${setKey}', this.value)"
+                       oninput="onSetInputChange('${setKey}', this.value, ${exIdx}, ${sIdx})"
                        onfocus="this.select()">
               </div>
               <button class="set-check-btn" id="btn-${setKey}" onclick="toggleSet('${setKey}', ${exIdx}, ${sIdx})">
@@ -1360,6 +1467,7 @@
         `;
 
         container.appendChild(card);
+        updateExerciseBadge(exIdx);
       });
 
       updateOverallProgress();
@@ -1374,11 +1482,17 @@
     }
 
     // Изменение значения в инпуте
-    function onSetInputChange(setKey, val) {
+    function onSetInputChange(setKey, val, exIdx, sIdx) {
       if (!userSetsState[setKey]) {
         userSetsState[setKey] = { completed: false, val: val };
       } else {
         userSetsState[setKey].val = val;
+      }
+      saveLocalSessionState();
+
+      // Если подход уже был отмечен как выполненный, синхронизируем новое значение в таблицу на лету
+      if (userSetsState[setKey].completed && exIdx !== undefined && sIdx !== undefined) {
+        syncSingleSetToSheet(exIdx, sIdx, true, val);
       }
     }
 
@@ -1404,8 +1518,57 @@
         startRestTimer();
       }
 
+      // 1. Сохраняем состояние сессии локально мгновенно
+      saveLocalSessionState();
+
+      // 2. Отправляем в Google Таблицу на лету
+      syncSingleSetToSheet(exIdx, sIdx, isCompleted, inputEl.value);
+
       updateExerciseBadge(exIdx);
       updateOverallProgress();
+    }
+
+    // Фоновая отправка одного подхода в Google Таблицу (Auto-Save on Check)
+    async function syncSingleSetToSheet(exIdx, sIdx, completed, val) {
+      if (!scriptApiUrl || !workoutData) return;
+
+      const ex = workoutData.exercises[exIdx];
+      if (!ex || !ex.sets[sIdx]) return;
+      const set = ex.sets[sIdx];
+
+      const todayStr = workoutData.targetDate || new Date().toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
+      const payload = {
+        action: "save_set",
+        block: currentBlock,
+        targetCol: workoutData.targetCol || (currentBlock === 1 ? 3 : 7),
+        dateRow: workoutData.dateRow || (currentBlock === 1 ? 2 : 44),
+        row: set.row,
+        value: val || set.target || set.prev,
+        completed: completed,
+        date: todayStr
+      };
+
+      activeSyncRequests++;
+      updateSyncStatus('saving');
+
+      try {
+        await fetch(scriptApiUrl, {
+          method: 'POST',
+          mode: 'no-cors',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        activeSyncRequests = Math.max(0, activeSyncRequests - 1);
+        if (activeSyncRequests === 0) {
+          updateSyncStatus('synced');
+        }
+      } catch (err) {
+        console.warn("Ошибка автосохранения подхода:", err);
+        activeSyncRequests = Math.max(0, activeSyncRequests - 1);
+        if (activeSyncRequests === 0) {
+          updateSyncStatus('error');
+        }
+      }
     }
 
     // Обновление счетчика одного упражнения
@@ -1556,17 +1719,19 @@
         });
       });
 
-      const todayStr = new Date().toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
+      const todayStr = workoutData.targetDate || new Date().toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
       const payload = {
+        action: "save_workout",
         block: currentBlock,
         date: todayStr,
-        targetCol: workoutData.targetCol || 3,
+        targetCol: workoutData.targetCol || (currentBlock === 1 ? 3 : 7),
         dateRow: workoutData.dateRow || (currentBlock === 1 ? 2 : 44),
         results: results
       };
 
       if (scriptApiUrl) {
         try {
+          updateSyncStatus('saving');
           const response = await fetch(scriptApiUrl, {
             method: 'POST',
             mode: 'no-cors', // Apps Script web app standard redirect handling
@@ -1574,12 +1739,14 @@
             body: JSON.stringify(payload)
           });
 
+          updateSyncStatus('synced');
           closeFinishModal();
           showToast("🎉 Тренировка успешно сохранена в Google Таблицу!");
           playSuccessSound();
           return;
         } catch (err) {
           console.error("Ошибка сохранения в Google Таблицу:", err);
+          updateSyncStatus('error');
           alert("Не удалось отправить данные в Google Таблицу. Проверьте интернет или настройки Apps Script URL.");
         } finally {
           confirmBtn.disabled = false;
